@@ -34,9 +34,9 @@ admin, or multisig anywhere.
 - Pool 0 (stETH) state: `totalVirtualDeposited` = 16,946.80 stETH-virtual,
   real `totalDeposited` = 8,208.44 stETH, daily pool emission = 2,897.2 MOR
   (RewardPool: initial 3,456 MOR/day, decrease 0.5926 MOR/day, day 943).
-- Over-issuance vs. the same capital at 1x: with 1,000 stETH cycled,
+- Reward-share dilution vs. the same capital at 1x: with 1,000 stETH cycled,
   ~11,608 MOR/week (~$22,500 at $1.94/MOR), ~605,300 MOR/year
-  (~$1.17M) redirected from honest stakers' pro-rata share.
+  (~$1.17M) redirected from honest stakers' pro-rata shares of the fixed pool emission.
 - Every honest staker in the pool is diluted for the attacker's whole
   boosted window, each cycle.
 
