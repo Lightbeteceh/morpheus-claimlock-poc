@@ -73,31 +73,66 @@ contract StakeFlowTest is Test {
         assertApproxEqRel(deposited, staked, 1e12, "staked amount mismatch (rounding ok)");
     }
 
-    /// Full flow: stake -> warp past all lock periods -> withdraw.
-    /// Reward claims route through L1Sender (LayerZero) and cannot complete
-    /// on a fork; withdraws prove the accounting path instead.
-    /// NOTE: the warp forward makes Chainlink answers stale by the time of
-    /// the second distributeRewards inside withdraw — the price path zeroes
-    /// and the call reverts with "DR: price for pair is zero". Withdraw
-    /// within the freshness window (small roll only) to keep the price valid.
+    /// Real stETH/ETH Chainlink answer at the pinned block, captured before
+    /// any warp. Forks do not advance Chainlink feeds, so after vm.warp the
+    /// freshness gate (allowedPriceUpdateDelay) zeroes the price. Mainnet
+    /// feeds update hourly; we keep the REAL captured price and only mock
+    /// the freshness gate for post-warp calls.
+    function _realStethPrice() internal view returns (uint256) {
+        bytes32 stethPathId = 0x7890db9c0a88d1cacb4485f81f93172a6b7b8c19af9c1a9985563f7d45ce2e6f;
+        (bool ok, bytes memory res) = Targets.CHAINLINK_DATA_CONSUMER.staticcall(
+            abi.encodeWithSignature("getChainLinkDataFeedLatestAnswer(bytes32)", stethPathId)
+        );
+        require(ok, "price read failed");
+        uint256 p = abi.decode(res, (uint256));
+        require(p > 0, "no real price at pinned block");
+        return p;
+    }
+
+    function _mockFreshChainlink(uint256 realPrice) internal {
+        vm.mockCall(
+            Targets.CHAINLINK_DATA_CONSUMER,
+            abi.encodeWithSignature("getChainLinkDataFeedLatestAnswer(bytes32)"),
+            abi.encode(realPrice)
+        );
+    }
+
+    /// Full flow: stake -> warp past the 7-day withdraw lock -> withdraw,
+    /// asserting the principal fully exits the pool and lands back in the
+    /// attacker's wallet. Reward claims route through L1Sender (LayerZero)
+    /// and cannot complete on a fork; withdraws prove the accounting path.
     function test_stake_then_withdraw_after_lock() public {
+        uint256 realPrice = _realStethPrice();
         (, , , uint256 minimalStake, ) = dp.rewardPoolsProtocolDetails(REWARD_POOL);
         assertGt(minimalStake, 0, "minimalStake read failed");
         uint256 staked = _acquireAndStake(10 ether, 0);
+        assertGt(staked, 0, "nothing staked");
 
-        // Warp in steps small enough that the Chainlink feed stays fresh:
-        // each distributeRewards reads latestRoundData with a freshness bound.
+        // Warp past the 7-day withdraw lock; keep the real price valid by
+        // mocking only the freshness gate (forks freeze Chainlink feeds).
         vm.warp(block.timestamp + 7 days + 1);
+        _mockFreshChainlink(realPrice);
+
+        uint256 balBefore = steth.balanceOf(attacker);
         vm.prank(attacker);
-        try dp.withdraw(REWARD_POOL, staked) {
-            (, uint256 depositedAfter, , , , , , , ) = dp.usersData(attacker, REWARD_POOL);
-            assertEq(depositedAfter, 0, "withdraw did not clear deposit");
-        } catch {
-            // Expected on a fork past the freshness window: the revert proves
-            // the protocol fails closed when prices are stale, and documents
-            // the w/withdraw DoS surface (out of bounty scope per 1.2, but
-            // recorded as an operational observation).
-            emit log_named_string("withdraw revert", "price freshness (expected past window)");
-        }
+        dp.withdraw(REWARD_POOL, staked);
+
+        // Principal exits the pool (stETH share rounding leaves <= 10 wei dust).
+        (, uint256 depositedAfter, , , , , , , ) = dp.usersData(attacker, REWARD_POOL);
+        assertApproxEqAbs(
+            depositedAfter,
+            0,
+            10,
+            "withdraw did not exit principal (beyond stETH dust <= 10 wei)"
+        );
+
+        // Principal is back in the attacker's wallet.
+        uint256 recovered = steth.balanceOf(attacker) - balBefore;
+        assertApproxEqAbs(
+            recovered,
+            staked,
+            10,
+            "attacker did not recover principal (beyond stETH dust <= 10 wei)"
+        );
     }
 }
