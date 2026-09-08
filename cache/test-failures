@@ -1,1 +1,0 @@
-{"version":1,"failures":[{"contract":"test/RepeatCycle.t.sol:RepeatCyclePoC","test":"test_repeat_cycle_farming"}]}

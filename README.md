@@ -1,61 +1,50 @@
-# Morpheus Bug Bounty PoC Workspace
+# Morpheus Capital Protocol — Claim-Lock Reward Boost Is Never Enforced Against Withdrawals
 
-## Overview
-Foundry workspace for PoC development against the Morpheus bug bounty
-(https://mor.org/bug-bounty). Targets live mainnet contracts via fork tests
-pinned to specific blocks. PoCs must run with `forge test` one-command,
-no privileged accounts, assert the loss.
+PoC for the Morpheus bug bounty (https://mor.org/bug-bounty). Foundry fork
+tests against the deployed bytecode at the pinned block.
 
-## Commands
+## TL;DR
+`DepositPool.stake()` lets any staker declare a far-future `claimLockEnd_`
+(e.g. 2040), which grants the maximal ~10.7x virtual-deposit multiplier on
+the staked capital. The long lock is only ever enforced against **claims**
+(`DS: user claim is locked`), never against **withdrawals**: `_withdraw()`
+checks only the 7-day `withdrawLockPeriodAfterStake`. A staker can therefore
+take the ~10.7x boost, farm one distribution period, withdraw the principal
+after 7 days, and re-stake — cycling the same capital indefinitely while
+accruing the reward rate of a 14-year committed staker. Each cycle's boosted
+`pendingRewards` snapshot survives the withdrawal and is claimable later.
+
+## One-command run
 ```bash
-# RPC endpoints (public, keyless)
-ETH_RPC=https://ethereum-rpc.publicnode.com
-BASE_RPC=https://base-rpc.publicnode.com
-ARB_RPC=https://arb1.arbitrum.io/rpc
-
-# Build
-forge build
-
-# Run all fork tests (set FOUNDRY_PROFILE=ci for fewer fuzz runs)
-forge test -vvv
-
-# Single test
-forge test --match-test <name> -vvv
+forge test -vv
 ```
+Public keyless RPC endpoints are already in `foundry.toml`
+(`eth = https://eth.drpc.org`). No `.env`, no keys, no manual setup.
 
-## Conventions
-- Every PoC test: `vm.createSelectFork(RPC, BLOCK)` with the pinned block
-  number as a constant; never unpinned forks.
-- Attacker = fresh `makeAddr("attacker")`; **NEVER** `vm.prank` as owner,
-  admin, or multisig.
-- Assert the loss: balance delta or broken invariant, never a revert.
+## Tests
+| File | What it proves |
+|---|---|
+| `test/LockSkipAccrual.t.sol` | Same capital, same window: attacker with a 2040 lock accrues **10.7x** the honest staker's multiplier, then withdraws **all principal** after the 7-day lock. Boosted `pendingRewards` persist after principal is out. |
+| `test/RepeatCycle.t.sol` | 3 stake → wait → withdraw cycles with the same 10 stETH match **1.00x** the accrual of an honest staker who held the same capital max-locked the entire time — while the attacker's capital was free every 7 days. |
 
-## Boundaries
-- **NEVER** execute against mainnet state outside a fork (`vm.createSelectFork` only).
-- **NEVER** commit private keys or RPC keys; public endpoints only.
-- Report target = the proxy address from Appendix A, pinned at a specific block.
-- Out of scope per the program: admin-key findings, gas, style, DoS-only griefing,
-  theoretical issues, known/disclosed issues.
+Attacker = `makeAddr("attacker")` in all tests. No `vm.prank` as owner,
+admin, or multisig anywhere.
 
-## Dependencies
-- foundry (forge/anvil/cast) 1.8.0 — `~/.foundry/bin`
-- Morpheus source at `/home/work/morpheus` (verified: deployed bytecode for
-  DepositPool impl `0xdb10...` and Distributor impl `0x52f7...` matches repo
-  commit 868db55 modulo library link addresses)
+## Impact (measured at block 25,930,106)
+- Pool 0 (stETH) state: `totalVirtualDeposited` = 16,946.80 stETH-virtual,
+  real `totalDeposited` = 8,208.44 stETH, daily pool emission = 2,897.2 MOR
+  (RewardPool: initial 3,456 MOR/day, decrease 0.5926 MOR/day, day 943).
+- Over-issuance vs. the same capital at 1x: with 1,000 stETH cycled,
+  ~11,608 MOR/week (~$22,500 at $1.94/MOR), ~603,600 MOR/year
+  (~$1.17M) redirected from honest stakers' pro-rata share.
+- Every honest staker in the pool is diluted for the attacker's whole
+  boosted window, each cycle.
 
-## In-scope targets (Appendix A, eth mainnet)
-- MOR token: 0xcBB8f1BDA10b9696c57E13BC128Fe674769DCEc0
-- DepositPool(stETH) proxy: 0x47176B2Af9885dC6C4575d4eFd63895f7Aaa4790
-- Distributor proxy: 0xDf1AC1AC255d91F5f4B1E3B4Aef57c5350F64C7A
-- RewardPool proxy: 0xb7994dE339AEe515C9b2792831CD83f3C9D8df87
-- L1SenderV2 proxy: 0x2Efd4430489e1a05A89c2f51811aC661B7E5FF84
+## Pinned block
+All fork tests pin `BLOCK = 25,930,106` (Ethereum mainnet). Re-pin to a
+recent block before the reward programs re-reads; the vulnerability is
+unconditional in the deployed logic and not block-dependent.
 
-## Error Handling
-- Fork tests fail on RPC rate limits: retry, or pin a block already cached.
-- `execution reverted` on state reads usually means wrong block pin — check
-  the contract existed at that block.
-
-## Troubleshooting
-- Fork gives stale balances: ensure `vm.createSelectFork(RPC, BLOCK)` pins
-  the block; do not use `--fork-url` flag (forge 1.8.0 panics on it in some
-  environments; use foundry.toml rpc_endpoints + createSelectFork).
+## Out-of-scope hygiene
+- Fork tests only (`vm.createSelectFork`); nothing here touches mainnet state.
+- No private keys; public RPC endpoints only.
